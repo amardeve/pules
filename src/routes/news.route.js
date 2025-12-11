@@ -1,28 +1,34 @@
 
-
-
+// src/routes/news.route.js
 const express = require('express');
 const router = express.Router();
 
-const upload = require('../middlewares/upload'); // your multer config (upload.array etc)
-const auth = require('../middlewares/auth');     // must export function auth + auth.authorize(role)
-const validate = require('../middlewares/validate'); // your Joi wrapper middleware
+const upload = require('../middlewares/multerMemory'); // memory multer
+const auth = require('../middlewares/auth');           // existing auth (CommonJS)
+const validate = require('../middlewares/validate');
 const { createNewsSchema, updateNewsSchema } = require('../validators/news.validator');
-
 const controller = require('../controllers/news.controller');
 
-// Public
-// list: supports ?q=searchText&category=cat&page=1&limit=20&sort=-createdAt
+// helper to wrap multer and return JSON errors if upload fails
+function multerHandler(mw) {
+  return (req, res, next) => {
+    mw(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message || 'Upload error' });
+      next();
+    });
+  };
+}
+
+// Public endpoints
 router.get('/', controller.listNews);
 router.get('/:id', controller.getNews);
 
-// Admin-protected create / update / delete
-// Use upload.array('images', 10) to accept multiple files under key "images"
+// Admin endpoints
 router.post(
   '/',
   auth,
   auth.authorize('admin'),
-  upload.array('images', 10),
+  multerHandler(upload.array('images', 10)),
   validate(createNewsSchema),
   controller.createNews
 );
@@ -31,7 +37,7 @@ router.put(
   '/:id',
   auth,
   auth.authorize('admin'),
-  upload.array('images', 10),
+  multerHandler(upload.array('images', 10)),
   validate(updateNewsSchema),
   controller.updateNews
 );

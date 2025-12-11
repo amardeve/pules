@@ -1,28 +1,28 @@
 
-
+// src/controllers/news.controller.js
 const newsService = require('../services/news.service');
 const slugify = require('slugify');
-const fs = require('fs');
-const path = require('path');
+const cloudinary = require('../config/cloudinary');
+const streamifier = require('streamifier');
 
-// normalize categories: accepts array or comma-separated string
+// helper to upload buffer to Cloudinary (folder optional)
+function uploadBufferToCloudinary(buffer, folder = 'pulse/news') {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: 'image' },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result); // result.secure_url, result.public_id, ...
+      }
+    );
+    streamifier.createReadStream(buffer).pipe(uploadStream);
+  });
+}
+
 function normalizeCategories(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw.map(s => String(s).trim()).filter(Boolean);
   return String(raw).split(',').map(s => s.trim()).filter(Boolean);
-}
-
-// delete local files helper
-function deleteLocalFiles(paths = []) {
-  for (const p of paths) {
-    if (!p) continue;
-    if (p.startsWith('/uploads/') || p.startsWith('uploads/')) {
-      const local = path.join(process.cwd(), p.replace(/^\//, ''));
-      if (fs.existsSync(local)) {
-        try { fs.unlinkSync(local); } catch (e) { /* ignore */ }
-      }
-    }
-  }
 }
 
 async function createNews(req, res, next) {
@@ -30,14 +30,19 @@ async function createNews(req, res, next) {
     const { title, content } = req.body;
     const categories = normalizeCategories(req.body.categories);
 
-    // collect images from multer (multipart/form-data) or from JSON (images field)
-    let images = [];
+    const images = [];
+    const imagesPublicIds = [];
+
+    // upload files in req.files (memory multer)
     if (req.files && req.files.length) {
-      images = req.files.map(f => `/uploads/${f.filename}`);
+      for (const file of req.files) {
+        const result = await uploadBufferToCloudinary(file.buffer, 'pulse/news');
+        images.push(result.secure_url || result.url);
+        imagesPublicIds.push(result.public_id);
+      }
     } else if (req.body.images) {
-      // if images is a JSON array or comma string
-      if (Array.isArray(req.body.images)) images = req.body.images;
-      else images = String(req.body.images).split(',').map(s => s.trim()).filter(Boolean);
+      const arr = Array.isArray(req.body.images) ? req.body.images : String(req.body.images).split(',').map(s=>s.trim()).filter(Boolean);
+      images.push(...arr);
     }
 
     const payload = {
@@ -45,6 +50,7 @@ async function createNews(req, res, next) {
       slug: slugify(title || '', { lower: true, strict: true }),
       content,
       images,
+      imagesPublicIds,
       categories
     };
     if (req.user && req.user.id) payload.createdBy = req.user.id;
@@ -89,26 +95,45 @@ async function updateNews(req, res, next) {
     if (req.body.content) data.content = req.body.content;
     if (req.body.categories !== undefined) data.categories = normalizeCategories(req.body.categories);
 
-    // handle images
     const newImages = [];
+    const newPublicIds = [];
+
     if (req.files && req.files.length) {
-      newImages.push(...req.files.map(f => `/uploads/${f.filename}`));
+      for (const file of req.files) {
+        const result = await uploadBufferToCloudinary(file.buffer, 'pulse/news');
+        newImages.push(result.secure_url || result.url);
+        newPublicIds.push(result.public_id);
+      }
     }
 
-    // if JSON images sent, handle them only if provided
     if (req.body.images) {
-      const jsonImgs = Array.isArray(req.body.images) ? req.body.images : String(req.body.images).split(',').map(s=>s.trim()).filter(Boolean);
-      newImages.push(...jsonImgs);
+      const arr = Array.isArray(req.body.images) ? req.body.images : String(req.body.images).split(',').map(s=>s.trim()).filter(Boolean);
+      newImages.push(...arr);
     }
 
-    // Replace behaviour: if query replaceImages=true -> delete old local images and set images to newImages
     if (req.query.replaceImages === 'true') {
-      // delete local old images
-      deleteLocalFiles(existing.images || []);
+      // delete old cloudinary images if public ids exist
+      if (existing.imagesPublicIds && existing.imagesPublicIds.length) {
+        for (const pid of existing.imagesPublicIds) {
+          try { await cloudinary.uploader.destroy(pid, { invalidate: true }); } catch(e) { /* ignore */ }
+        }
+      }
       data.images = newImages;
-    } else if (newImages.length) {
-      // append
-      data.images = (existing.images || []).concat(newImages);
+      data.imagesPublicIds = newPublicIds;
+    } else {
+      if (newImages.length) data.images = (existing.images || []).concat(newImages);
+      if (newPublicIds.length) data.imagesPublicIds = (existing.imagesPublicIds || []).concat(newPublicIds);
+    }
+
+    // if client provided images JSON and replaceImages=true (and no files), also handle deletion
+    if (req.body.images && req.query.replaceImages === 'true' && (!req.files || !req.files.length)) {
+      if (existing.imagesPublicIds && existing.imagesPublicIds.length) {
+        for (const pid of existing.imagesPublicIds) {
+          try { await cloudinary.uploader.destroy(pid, { invalidate: true }); } catch(e) { /* ignore */ }
+        }
+      }
+      data.images = Array.isArray(req.body.images) ? req.body.images : String(req.body.images).split(',').map(s=>s.trim()).filter(Boolean);
+      data.imagesPublicIds = [];
     }
 
     const updated = await newsService.updateNews(req.params.id, data);
@@ -123,8 +148,11 @@ async function removeNews(req, res, next) {
     const existing = await newsService.getNewsById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'News not found' });
 
-    // delete local images
-    deleteLocalFiles(existing.images || []);
+    if (existing.imagesPublicIds && existing.imagesPublicIds.length) {
+      for (const pid of existing.imagesPublicIds) {
+        try { await cloudinary.uploader.destroy(pid, { invalidate: true }); } catch(e) { /* ignore */ }
+      }
+    }
 
     await newsService.deleteNews(req.params.id);
     res.json({ message: 'News deleted' });
@@ -133,10 +161,4 @@ async function removeNews(req, res, next) {
   }
 }
 
-module.exports = {
-  createNews,
-  listNews,
-  getNews,
-  updateNews,
-  removeNews
-};
+module.exports = { createNews, listNews, getNews, updateNews, removeNews };

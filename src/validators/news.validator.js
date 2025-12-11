@@ -29,3 +29,4 @@ const updateNewsSchema = Joi.object({
 }).min(1);
 
 module.exports = { createNewsSchema, updateNewsSchema };
+

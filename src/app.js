@@ -12,6 +12,21 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json());
 
+///// home page
+app.get('/', (req, res) => {
+  res.send(`
+    <html>
+      <head><title>Pulse</title></head>
+      <body style="font-family:system-ui;text-align:center;padding:3rem">
+        <h1>Pulse API</h1>
+        <p>Server is running ✅</p>
+        <p><a href="/health">/health</a></p>
+      </body>
+    </html>
+  `);
+});
+
+
 // routes
 app.use("/api", routes);
 
